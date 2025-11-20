@@ -183,6 +183,7 @@ def main():
     
     st.title("📄 GSTR-3B PDF Consolidation Tool")
     st.markdown("Upload multiple GSTR-3B PDFs to consolidate key financial figures into a single table and export as CSV.")
+    st.markdown('<font color="red">AFTER CONSOLIDATION, PLEASE ENSURE DATA CORRECTNESS OF OUTPUT BY MANUALLY TESTING ONE UPLOADED GSTR3B.</font>', unsafe_allow_html=True)
 
     # File Uploader component
     uploaded_files = st.file_uploader(
@@ -226,4 +227,5 @@ def main():
         )
 
 if __name__ == "__main__":
+
     main()
