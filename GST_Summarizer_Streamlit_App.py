@@ -3,6 +3,7 @@ import pdfplumber
 import re
 import pandas as pd
 import io
+import zipfile
 
 st.set_page_config(page_title="GSTR-3B PDF Consolidation Tool", layout="wide")
 
@@ -82,65 +83,58 @@ def extract_data_from_pdf_content(file_bytes, pdf_name):
         st.error(f"Failed parsing {pdf_name}: {e}")
         return None
 
-# --- App UI with Session Storage for Mobile ---
-
+# App UI
 st.title("📄 GSTR-3B PDF Consolidation Tool")
 st.markdown(":red[**AFTER CONSOLIDATION, PLEASE ENSURE DATA CORRECTNESS BY CHECKING ONE FILE MANUALLY.**]")
 
-# Initialize state to preserve files across mobile browser backgrounding/refreshes
-if "file_vault" not in st.session_state:
-    st.session_state.file_vault = {}  # {filename: bytes}
-
-# Single-file uploader (reliable on Android)
-new_file = st.file_uploader(
-    "Upload GSTR-3B PDF",
-    type=None,
-    accept_multiple_files=False,
-    key="mobile_uploader",
-    help="Important: On Android, select from 'Downloads' or 'Internal Storage', never from 'Recent'."
+# File Uploader with Multi-Select and ZIP Support
+raw_uploads = st.file_uploader(
+    "Upload multiple PDFs or a single .ZIP file",
+    type=["pdf", "zip"],
+    accept_multiple_files=True,
+    help="On mobile: Long-press to select multiple files, or upload a .ZIP containing all PDFs."
 )
 
-# Store newly selected file into the persistent vault immediately
-if new_file is not None:
-    if new_file.name.lower().endswith(".pdf"):
-        new_file.seek(0)
-        file_bytes = new_file.read()
-        if len(file_bytes) > 0:
-            st.session_state.file_vault[new_file.name] = file_bytes
-            st.toast(f"Added: {new_file.name}", icon="✅")
-    else:
-        st.error("Selected file is not a PDF.")
+pdf_queue = []
 
-# Vault Controls & Display
-total_files = len(st.session_state.file_vault)
+if raw_uploads:
+    for item in raw_uploads:
+        item.seek(0)
+        file_bytes = item.read()
+        name_lower = item.name.lower()
 
-if total_files > 0:
-    st.write(f"### Files ready for consolidation ({total_files})")
-    for name in list(st.session_state.file_vault.keys()):
-        st.write(f"• `{name}`")
+        # Handle ZIP files
+        if name_lower.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                    for inner_file in z.namelist():
+                        if inner_file.lower().endswith(".pdf") and not inner_file.startswith("__MACOSX"):
+                            pdf_queue.append((inner_file, z.read(inner_file)))
+            except Exception as zip_err:
+                st.error(f"Failed to read ZIP file ({item.name}): {zip_err}")
+        # Handle regular PDFs
+        elif name_lower.endswith(".pdf"):
+            pdf_queue.append((item.name, file_bytes))
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        start_processing = st.button("🚀 Consolidate All Added Files", type="primary", use_container_width=True)
-    with col2:
-        if st.button("🗑️ Clear All Files", use_container_width=True):
-            st.session_state.file_vault.clear()
-            st.rerun()
-
-    if start_processing:
+if pdf_queue:
+    st.success(f"**{len(pdf_queue)}** PDF(s) detected and ready to process.")
+    
+    if st.button("🚀 Consolidate Data", type="primary", use_container_width=True):
         master = pd.DataFrame()
         bar = st.progress(0)
-        
-        for idx, (pdf_name, pdf_bytes) in enumerate(st.session_state.file_vault.items()):
+
+        for i, (pdf_name, pdf_bytes) in enumerate(pdf_queue):
             row = extract_data_from_pdf_content(pdf_bytes, pdf_name)
             if row is not None:
                 master = pd.concat([master, row], ignore_index=True)
-            bar.progress((idx + 1) / total_files)
-            
+            bar.progress((i + 1) / len(pdf_queue))
+
         bar.empty()
 
         if not master.empty:
-            master = master.sort_values(by=['FY', 'Month_Index', 'GSTIN']).drop_duplicates(subset=['FY', 'Month_Index', 'GSTIN'], keep='last')
+            master = master.sort_values(by=['FY', 'Month_Index', 'GSTIN']).drop_duplicates(
+                subset=['FY', 'Month_Index', 'GSTIN'], keep='last'
+            )
             st.dataframe(master, use_container_width=True)
 
             csv = master.to_csv(index=False).encode('utf-8')
@@ -152,6 +146,4 @@ if total_files > 0:
                 use_container_width=True
             )
         else:
-            st.warning("Could not extract any data from the files.")
-else:
-    st.info("Pick your first PDF above. You can add more PDFs one by one without losing previous ones.")
+            st.warning("No tabular GSTR-3B data could be extracted.")
