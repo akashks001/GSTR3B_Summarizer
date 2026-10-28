@@ -1,33 +1,16 @@
-import io
+import streamlit as st
+import pdfplumber
 import re
 import pandas as pd
-import pdfplumber
-import streamlit as st
+import io
 
-# --- Regex Patterns ---
-# Matches formatted numbers (handles optional commas, negative signs, and decimals)
-NUM_PATTERN = r"([\d,]+\.?\d*|-)"
+st.set_page_config(page_title="GSTR-3B PDF Consolidation Tool", layout="wide")
 
-outward_pattern = (
-    r"Outward taxable supplies[^\n\d]*"
-    + r"\s+".join([NUM_PATTERN] * 5)
-)
-outward_zero_pattern = (
-    r"\(b\)\s*Outward taxable supplies\s*\(zero rated\)\s*"
-    + r"\s+".join([NUM_PATTERN] * 5)
-)
-outward_nil_pattern = (
-    r"\(c\s*\)\s*Other outward supplies\s*\(nil rated,\s*exempted\)\s*"
-    + r"\s+".join([NUM_PATTERN] * 5)
-)
-inward_pattern = (
-    r"\(d\)\s*Inward supplies\s*\(liable to reverse charge\)\s*"
-    + r"\s+".join([NUM_PATTERN] * 5)
-)
-non_gst_pattern = (
-    r"\(e\)\s*Non-GST outward supplies\s*"
-    + r"\s+".join([NUM_PATTERN] * 5)
-)
+outward_pattern = r"Outward taxable supplies.*?(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})"
+outward_zero_pattern = r"\(b\) Outward taxable supplies \(zero rated\)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)"
+outward_nil_pattern = r"\(c\)\s*Other outward supplies \(nil rated, exempted\)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)"
+inward_pattern = r"\(d\) Inward supplies \(liable to reverse charge\)\s*(\d+\.\d{2})\s*(\d+\.\d{2})\s*(\d+\.\d{2})\s*(\d+\.\d{2})\s*(\d+\.\d{2})"
+non_gst_pattern = r"\(e\) Non-GST outward supplies\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)"
 
 month_to_index = {
     "April": 1, "May": 2, "June": 3, "July": 4, "August": 5,
@@ -35,23 +18,15 @@ month_to_index = {
     "January": 10, "February": 11, "March": 12
 }
 
-def parse_val(val_str: str) -> float:
-    """Converts regex numeric matches to float, stripping commas and handling dashes."""
-    cleaned = val_str.replace(",", "").replace("-", "0.0").strip()
+def extract_data_from_pdf_content(file_bytes, pdf_name):
     try:
-        return float(cleaned) if cleaned else 0.0
-    except ValueError:
-        return 0.0
-
-def extract_data_from_pdf_content(file_content, pdf_name):
-    try:
-        with pdfplumber.open(file_content) as pdf:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             if not pdf.pages:
-                st.warning(f"Skipping **{pdf_name}**: File contains no pages.")
+                st.warning(f"File {pdf_name} has no pages.")
                 return None
 
             first_page = pdf.pages[0]
-            text = first_page.extract_text(x_tolerance=2, y_tolerance=2) or ""
+            text = first_page.extract_text(x_tolerance=1, y_tolerance=1) or ""
 
             outward_sales = outward_igst = outward_cgst = outward_sgst = outward_cess = 0.0
             outward_zero_sales = outward_zero_igst = outward_zero_cgst = outward_zero_sgst = outward_zero_cess = 0.0
@@ -59,42 +34,32 @@ def extract_data_from_pdf_content(file_content, pdf_name):
             inward_sales = inward_igst = inward_cgst = inward_sgst = inward_cess = 0.0
             non_gst_sales = non_gst_igst = non_gst_cgst = non_gst_sgst = non_gst_cess = 0.0
 
-            # 1. Outward taxable supplies
-            m = re.search(outward_pattern, text, re.IGNORECASE)
-            if m:
-                outward_sales, outward_igst, outward_cgst, outward_sgst, outward_cess = [
-                    parse_val(m.group(i)) for i in range(1, 6)
-                ]
+            outward_match = re.search(outward_pattern, text, re.DOTALL)
+            if outward_match:
+                outward_sales, outward_igst, outward_cgst, outward_sgst, outward_cess = map(float, outward_match.groups())
 
-            # 2. Outward taxable supplies (zero rated)
-            m = re.search(outward_zero_pattern, text, re.IGNORECASE)
-            if m:
+            outward_zero_match = re.search(outward_zero_pattern, text, re.DOTALL)
+            if outward_zero_match:
                 outward_zero_sales, outward_zero_igst, outward_zero_cgst, outward_zero_sgst, outward_zero_cess = [
-                    parse_val(m.group(i)) for i in range(1, 6)
+                    float(x.replace('-', '0.00')) for x in outward_zero_match.groups()
                 ]
 
-            # 3. Other outward supplies (nil rated, exempted)
-            m = re.search(outward_nil_pattern, text, re.IGNORECASE)
-            if m:
+            outward_nil_match = re.search(outward_nil_pattern, text, re.DOTALL)
+            if outward_nil_match:
                 outward_nil_sales, outward_nil_igst, outward_nil_cgst, outward_nil_sgst, outward_nil_cess = [
-                    parse_val(m.group(i)) for i in range(1, 6)
+                    float(x.replace('-', '0.00')) for x in outward_nil_match.groups()
                 ]
 
-            # 4. Inward supplies (liable to reverse charge)
-            m = re.search(inward_pattern, text, re.IGNORECASE)
-            if m:
-                inward_sales, inward_igst, inward_cgst, inward_sgst, inward_cess = [
-                    parse_val(m.group(i)) for i in range(1, 6)
-                ]
+            inward_match = re.search(inward_pattern, text, re.DOTALL)
+            if inward_match:
+                inward_sales, inward_igst, inward_cgst, inward_sgst, inward_cess = map(float, inward_match.groups())
 
-            # 5. Non-GST outward supplies
-            m = re.search(non_gst_pattern, text, re.IGNORECASE)
-            if m:
+            non_gst_match = re.search(non_gst_pattern, text, re.DOTALL)
+            if non_gst_match:
                 non_gst_sales, non_gst_igst, non_gst_cgst, non_gst_sgst, non_gst_cess = [
-                    parse_val(m.group(i)) for i in range(1, 6)
+                    float(x.replace('-', '0.00')) for x in non_gst_match.groups()
                 ]
 
-            # Calculations
             sales = outward_sales + outward_zero_sales + outward_nil_sales - inward_sales + non_gst_sales
             igst = outward_igst + outward_zero_igst + outward_nil_igst - inward_igst + non_gst_igst
             cgst = outward_cgst + outward_zero_cgst + outward_nil_cgst - inward_cgst + non_gst_cgst
@@ -102,93 +67,58 @@ def extract_data_from_pdf_content(file_content, pdf_name):
             cess = outward_cess + outward_zero_cess + outward_nil_cess - inward_cess + non_gst_cess
             total = sales + igst + cgst + sgst + cess
 
-            # Metadata extraction
-            gstin_match = re.search(r"GSTIN\s*(?:of the supplier)?\s*[:\-]?\s*([0-9A-Z]{15})", text, re.IGNORECASE)
-            gstin = gstin_match.group(1).strip() if gstin_match else "N/A"
+            GSTIN_match = re.search(r"GSTIN of the supplier\s*([A-Z0-9]+)", text)
+            GSTIN = GSTIN_match.group(1).strip() if GSTIN_match else "N/A"
 
-            fy_match = re.search(r"Year\s*[:\-]?\s*(\d{4}-\d{2})", text, re.IGNORECASE)
-            fy = fy_match.group(1) if fy_match else "N/A"
+            fy_match = re.search(r"Year\s*(\d{4}-\d{2})", text)
+            FY = fy_match.group(1) if fy_match else "N/A"
 
-            month_match = re.search(r"Period\s*[:\-]?\s*([A-Za-z]+)", text, re.IGNORECASE)
-            month = month_match.group(1).capitalize() if month_match else "N/A"
-            month_index = month_to_index.get(month, 99)
+            month_match = re.search(r"Period\s*([A-Za-z]+)", text)
+            Month = month_match.group(1).strip() if month_match else "N/A"
+            Month_Index = month_to_index.get(Month, "N/A")
 
             return pd.DataFrame([{
-                "GSTIN": gstin,
-                "FY": fy,
-                "MONTH": month,
-                "Month_Index": month_index,
-                "Sales": sales,
-                "IGST": igst,
-                "CGST": cgst,
-                "SGST": sgst,
-                "Cess": cess,
-                "Total": total,
+                'GSTIN': GSTIN, 'FY': FY, 'MONTH': Month, 'Month_Index': Month_Index,
+                'Sales': sales, 'IGST': igst, 'CGST': cgst, 'SGST': sgst, 'Cess': cess, 'Total': total
             }])
-
     except Exception as e:
-        st.error(f"Error parsing **{pdf_name}**: {e}")
+        st.error(f"Failed parsing {pdf_name}: {e}")
         return None
 
-def process_uploaded_files(uploaded_files):
-    all_rows = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+st.title("📄 GSTR-3B PDF Consolidation Tool")
+st.markdown(":red[**AFTER CONSOLIDATION, PLEASE ENSURE DATA CORRECTNESS BY CHECKING ONE FILE MANUALLY.**]")
 
-    for idx, f in enumerate(uploaded_files):
-        status_text.text(f"Processing ({idx + 1}/{len(uploaded_files)}): {f.name}")
-        f.seek(0)  # Rewind buffer before reading
-        content = io.BytesIO(f.read())
-        row = extract_data_from_pdf_content(content, f.name)
-        if row is not None and not row.empty:
-            all_rows.append(row)
-        progress_bar.progress((idx + 1) / len(uploaded_files))
+# Android fix: allow single or multiple toggle to prevent UI hang
+mode = st.radio("Selection Mode", ["Single File", "Multiple Files"], horizontal=True)
 
-    progress_bar.empty()
-    status_text.empty()
+# Android fix: type=None avoids mime filtering drops
+raw_uploads = st.file_uploader(
+    "Choose PDF File(s)", 
+    type=None, 
+    accept_multiple_files=(mode == "Multiple Files"),
+    help="On mobile: Pick files from Internal Storage/Downloads, NOT from 'Recent'."
+)
 
-    if all_rows:
-        master = pd.concat(all_rows, ignore_index=True)
-        master = master.sort_values(by=["FY", "Month_Index", "GSTIN"])
-        master = master.drop_duplicates(subset=["FY", "Month_Index", "GSTIN"], keep="last")
-        return master
-    return pd.DataFrame()
+uploaded_files = []
+if raw_uploads:
+    if isinstance(raw_uploads, list):
+        uploaded_files = [f for f in raw_uploads if f.name.lower().endswith(".pdf")]
+    elif raw_uploads.name.lower().endswith(".pdf"):
+        uploaded_files = [raw_uploads]
 
-def main():
-    st.set_page_config(page_title="GSTR-3B Consolidation Tool", layout="wide")
-    st.title("📄 GSTR-3B PDF Consolidation Tool")
-
-    if "consolidated_df" not in st.session_state:
-        st.session_state.consolidated_df = None
-
-    uploaded_files = st.file_uploader(
-        "Upload GSTR-3B PDF Files",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
-
-    if uploaded_files:
-        st.info(f"{len(uploaded_files)} PDF(s) selected.")
-
-        if st.button("🚀 Consolidate Data"):
-            df = process_uploaded_files(uploaded_files)
-            if not df.empty:
-                st.session_state.consolidated_df = df
-            else:
-                st.warning("No tabular rows could be extracted. Please check the PDF format.")
-
-    # Render results from session state to survive mobile reruns
-    if st.session_state.consolidated_df is not None:
-        st.success("Data Consolidation Successful!")
-        st.dataframe(st.session_state.consolidated_df)
-
-        csv_data = st.session_state.consolidated_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="Download GST_Summary.csv",
-            data=csv_data,
-            file_name="GST_Summary.csv",
-            mime="text/csv"
-        )
-
-if __name__ == "__main__":
-    main()
+if uploaded_files:
+    st.success(f"{len(uploaded_files)} PDF file(s) ready.")
+    
+    if st.button("🚀 Consolidate Data", use_container_width=True):
+        master = pd.DataFrame()
+        bar = st.progress(0)
+        
+        for i, up_file in enumerate(uploaded_files):
+            up_file.seek(0)
+            content = up_file.read()
+            if not content:
+                continue
+            row = extract_data_from_pdf_content(content, up_file.name)
+            if row is not None:
+                master = pd.concat([master, row], ignore_index=True)
+            bar.progress((i + 1
