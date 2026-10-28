@@ -6,7 +6,6 @@ import io
 
 st.set_page_config(page_title="GSTR-3B PDF Consolidation Tool", layout="wide")
 
-# Safe patterns with explicitly matched parentheses
 outward_pattern = r"Outward taxable supplies.*?(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})"
 outward_zero_pattern = r"\(b\)\s*Outward taxable supplies\s*\(zero rated\)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)"
 outward_nil_pattern = r"\(c\s*\)\s*Other outward supplies\s*\(nil rated,\s*exempted\)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)\s*([\d\.\-]+)"
@@ -75,67 +74,75 @@ def extract_data_from_pdf_content(file_bytes, pdf_name):
             month = month_match.group(1).strip() if month_match else "N/A"
             month_index = month_to_index.get(month, "N/A")
 
-            row_dict = {
-                'GSTIN': gstin,
-                'FY': fy,
-                'MONTH': month,
-                'Month_Index': month_index,
-                'Sales': sales,
-                'IGST': igst,
-                'CGST': cgst,
-                'SGST': sgst,
-                'Cess': cess,
-                'Total': total
-            }
-            return pd.DataFrame([row_dict])
-            
+            return pd.DataFrame([{
+                'GSTIN': gstin, 'FY': fy, 'MONTH': month, 'Month_Index': month_index,
+                'Sales': sales, 'IGST': igst, 'CGST': cgst, 'SGST': sgst, 'Cess': cess, 'Total': total
+            }])
     except Exception as e:
         st.error(f"Failed parsing {pdf_name}: {e}")
         return None
 
-# App UI
+# --- App UI with Session Storage for Mobile ---
+
 st.title("📄 GSTR-3B PDF Consolidation Tool")
 st.markdown(":red[**AFTER CONSOLIDATION, PLEASE ENSURE DATA CORRECTNESS BY CHECKING ONE FILE MANUALLY.**]")
 
-mode = st.radio("Selection Mode", ["Single File", "Multiple Files"], horizontal=True)
+# Initialize state to preserve files across mobile browser backgrounding/refreshes
+if "file_vault" not in st.session_state:
+    st.session_state.file_vault = {}  # {filename: bytes}
 
-raw_uploads = st.file_uploader(
-    "Choose PDF File(s)", 
-    type=None, 
-    accept_multiple_files=(mode == "Multiple Files"),
-    help="On mobile: Pick files from Internal Storage/Downloads, NOT from 'Recent'."
+# Single-file uploader (reliable on Android)
+new_file = st.file_uploader(
+    "Upload GSTR-3B PDF",
+    type=None,
+    accept_multiple_files=False,
+    key="mobile_uploader",
+    help="Important: On Android, select from 'Downloads' or 'Internal Storage', never from 'Recent'."
 )
 
-uploaded_files = []
-if raw_uploads:
-    if isinstance(raw_uploads, list):
-        uploaded_files = [f for f in raw_uploads if f.name.lower().endswith(".pdf")]
-    elif raw_uploads.name.lower().endswith(".pdf"):
-        uploaded_files = [raw_uploads]
+# Store newly selected file into the persistent vault immediately
+if new_file is not None:
+    if new_file.name.lower().endswith(".pdf"):
+        new_file.seek(0)
+        file_bytes = new_file.read()
+        if len(file_bytes) > 0:
+            st.session_state.file_vault[new_file.name] = file_bytes
+            st.toast(f"Added: {new_file.name}", icon="✅")
+    else:
+        st.error("Selected file is not a PDF.")
 
-if uploaded_files:
-    st.success(f"{len(uploaded_files)} PDF file(s) ready.")
-    
-    if st.button("🚀 Consolidate Data", use_container_width=True):
+# Vault Controls & Display
+total_files = len(st.session_state.file_vault)
+
+if total_files > 0:
+    st.write(f"### Files ready for consolidation ({total_files})")
+    for name in list(st.session_state.file_vault.keys()):
+        st.write(f"• `{name}`")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        start_processing = st.button("🚀 Consolidate All Added Files", type="primary", use_container_width=True)
+    with col2:
+        if st.button("🗑️ Clear All Files", use_container_width=True):
+            st.session_state.file_vault.clear()
+            st.rerun()
+
+    if start_processing:
         master = pd.DataFrame()
         bar = st.progress(0)
         
-        for i, up_file in enumerate(uploaded_files):
-            up_file.seek(0)
-            content = up_file.read()
-            if not content:
-                continue
-            row = extract_data_from_pdf_content(content, up_file.name)
+        for idx, (pdf_name, pdf_bytes) in enumerate(st.session_state.file_vault.items()):
+            row = extract_data_from_pdf_content(pdf_bytes, pdf_name)
             if row is not None:
                 master = pd.concat([master, row], ignore_index=True)
-            bar.progress((i + 1) / len(uploaded_files))
+            bar.progress((idx + 1) / total_files)
             
         bar.empty()
-        
+
         if not master.empty:
             master = master.sort_values(by=['FY', 'Month_Index', 'GSTIN']).drop_duplicates(subset=['FY', 'Month_Index', 'GSTIN'], keep='last')
             st.dataframe(master, use_container_width=True)
-            
+
             csv = master.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download GST_Summary.csv",
@@ -145,4 +152,6 @@ if uploaded_files:
                 use_container_width=True
             )
         else:
-            st.warning("Could not extract any tabular data from the selected PDF(s).")
+            st.warning("Could not extract any data from the files.")
+else:
+    st.info("Pick your first PDF above. You can add more PDFs one by one without losing previous ones.")
